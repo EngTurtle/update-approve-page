@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pending App Updates</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 1100px; }
+  h1 { font-size: 1.4rem; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 0.5rem 0.6rem; border-bottom: 1px solid #8883; vertical-align: top; }
+  th { font-size: 0.8rem; text-transform: uppercase; opacity: 0.7; }
+  .badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
+  .sev-none, .sev-minor { background: #2e7d3220; color: #2e7d32; }
+  .sev-major { background: #e6820020; color: #e68200; }
+  .sev-breaking { background: #c6282820; color: #c62828; }
+  .badge-breaking { background: #c6282820; color: #c62828; margin-left: 0.3rem; }
+  button { cursor: pointer; padding: 0.35rem 0.8rem; border-radius: 6px; border: 1px solid #8886; font-size: 0.85rem; }
+  .btn-approve { background: #2e7d3220; }
+  .btn-dismiss { background: #c6282820; }
+  details summary { cursor: pointer; font-size: 0.85rem; opacity: 0.8; }
+  .actions { display: flex; gap: 0.4rem; }
+  #empty, #error { opacity: 0.7; padding: 1rem 0; }
+  #error { color: #c62828; }
+</style>
+</head>
+<body>
+<h1>Pending App Updates</h1>
+<div id="error" hidden></div>
+<div id="empty" hidden>No pending updates.</div>
+<table id="updates-table" hidden>
+  <thead>
+    <tr>
+      <th>App / Service</th>
+      <th>Version</th>
+      <th>Type</th>
+      <th>Severity</th>
+      <th>Confidence</th>
+      <th>Summary</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody id="updates-body"></tbody>
+</table>
+
+<script>
+async function loadUpdates() {
+  const errorEl = document.getElementById('error');
+  const emptyEl = document.getElementById('empty');
+  const tableEl = document.getElementById('updates-table');
+  const bodyEl = document.getElementById('updates-body');
+  errorEl.hidden = true;
+  emptyEl.hidden = true;
+  tableEl.hidden = true;
+  bodyEl.innerHTML = '';
+
+  let rows;
+  try {
+    const resp = await fetch('/api/updates');
+    if (!resp.ok) throw new Error(`Request failed: ${resp.status}`);
+    rows = await resp.json();
+  } catch (err) {
+    errorEl.textContent = `Failed to load updates: ${err}`;
+    errorEl.hidden = false;
+    return;
+  }
+
+  if (!Array.isArray(rows) || rows.length === 0) {
+    emptyEl.hidden = false;
+    return;
+  }
+
+  for (const row of rows) {
+    const tr = document.createElement('tr');
+
+    const nameTd = document.createElement('td');
+    nameTd.textContent = row.service_name && row.service_name !== row.app_name
+      ? `${row.app_name} / ${row.service_name}`
+      : row.app_name;
+    tr.appendChild(nameTd);
+
+    const versionTd = document.createElement('td');
+    versionTd.textContent = `${row.current_version || '?'} → ${row.target_version || '?'}`;
+    tr.appendChild(versionTd);
+
+    const typeTd = document.createElement('td');
+    typeTd.textContent = row.update_type || '';
+    tr.appendChild(typeTd);
+
+    const sevTd = document.createElement('td');
+    const sevBadge = document.createElement('span');
+    sevBadge.className = `badge sev-${row.severity || 'none'}`;
+    sevBadge.textContent = row.severity || 'none';
+    sevTd.appendChild(sevBadge);
+    if (row.breaking === true || row.breaking === 'true') {
+      const breakingBadge = document.createElement('span');
+      breakingBadge.className = 'badge badge-breaking';
+      breakingBadge.textContent = 'breaking';
+      sevTd.appendChild(breakingBadge);
+    }
+    tr.appendChild(sevTd);
+
+    const confTd = document.createElement('td');
+    confTd.textContent = row.confidence ?? '';
+    tr.appendChild(confTd);
+
+    const summaryTd = document.createElement('td');
+    summaryTd.textContent = row.summary || '';
+    if (row.reasoning) {
+      const details = document.createElement('details');
+      const summaryEl = document.createElement('summary');
+      summaryEl.textContent = 'reasoning';
+      const p = document.createElement('p');
+      p.textContent = row.reasoning;
+      details.appendChild(summaryEl);
+      details.appendChild(p);
+      summaryTd.appendChild(details);
+    }
+    tr.appendChild(summaryTd);
+
+    const actionsTd = document.createElement('td');
+    const actionsDiv = document.createElement('div');
+    actionsDiv.className = 'actions';
+    const approveBtn = document.createElement('button');
+    approveBtn.className = 'btn-approve';
+    approveBtn.textContent = 'Approve';
+    approveBtn.onclick = () => decide(row.id, 'approved');
+    const dismissBtn = document.createElement('button');
+    dismissBtn.className = 'btn-dismiss';
+    dismissBtn.textContent = 'Dismiss';
+    dismissBtn.onclick = () => decide(row.id, 'dismissed');
+    actionsDiv.appendChild(approveBtn);
+    actionsDiv.appendChild(dismissBtn);
+    actionsTd.appendChild(actionsDiv);
+    tr.appendChild(actionsTd);
+
+    bodyEl.appendChild(tr);
+  }
+
+  tableEl.hidden = false;
+}
+
+async function decide(id, decision) {
+  try {
+    const resp = await fetch(`/api/updates/${id}/decide`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision }),
+    });
+    if (!resp.ok) throw new Error(`Request failed: ${resp.status}`);
+  } catch (err) {
+    alert(`Failed to record decision: ${err}`);
+  }
+  loadUpdates();
+}
+
+loadUpdates();
+</script>
+</body>
+</html>
