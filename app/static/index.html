@@ -20,7 +20,10 @@
   .btn-approve { background: #2e7d3220; }
   .btn-dismiss { background: #c6282820; }
   details summary { cursor: pointer; font-size: 0.85rem; opacity: 0.8; }
-  .actions { display: flex; gap: 0.4rem; }
+  .actions { display: flex; flex-direction: column; gap: 0.4rem; }
+  /* Stronger top border marks the start of each stack group. */
+  tr.group-start td { border-top: 2px solid #8886; }
+  td.actions-cell { vertical-align: middle; }
   #empty, #error { opacity: 0.7; padding: 1rem 0; }
   #error { color: #c62828; }
 </style>
@@ -32,7 +35,8 @@
 <table id="updates-table" hidden>
   <thead>
     <tr>
-      <th>App / Service</th>
+      <th>App (stack)</th>
+      <th>Container</th>
       <th>Version</th>
       <th>Type</th>
       <th>Severity</th>
@@ -71,84 +75,109 @@ async function loadUpdates() {
     return;
   }
 
+  // Group rows by app_name (stack), preserving first-seen order. Portainer
+  // stacks / TrueNAS apps are updated as a whole, so all containers of one
+  // stack share a single Approve/Dismiss decision.
+  const groups = new Map();
   for (const row of rows) {
-    const tr = document.createElement('tr');
+    const key = row.app_name || '';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
 
-    const nameTd = document.createElement('td');
-    nameTd.textContent = row.service_name && row.service_name !== row.app_name
-      ? `${row.app_name} / ${row.service_name}`
-      : row.app_name;
-    tr.appendChild(nameTd);
+  for (const [appName, groupRows] of groups) {
+    const ids = groupRows.map(r => r.id);
+    groupRows.forEach((row, i) => {
+      const tr = document.createElement('tr');
+      if (i === 0) tr.className = 'group-start';
 
-    const versionTd = document.createElement('td');
-    versionTd.textContent = `${row.current_version || '?'} → ${row.target_version || '?'}`;
-    tr.appendChild(versionTd);
+      const appTd = document.createElement('td');
+      appTd.textContent = row.app_name || '';
+      tr.appendChild(appTd);
 
-    const typeTd = document.createElement('td');
-    typeTd.textContent = row.update_type || '';
-    tr.appendChild(typeTd);
+      const containerTd = document.createElement('td');
+      containerTd.textContent = row.service_name || '';
+      tr.appendChild(containerTd);
 
-    const sevTd = document.createElement('td');
-    const sevBadge = document.createElement('span');
-    sevBadge.className = `badge sev-${row.severity || 'none'}`;
-    sevBadge.textContent = row.severity || 'none';
-    sevTd.appendChild(sevBadge);
-    if (row.breaking === true || row.breaking === 'true') {
-      const breakingBadge = document.createElement('span');
-      breakingBadge.className = 'badge badge-breaking';
-      breakingBadge.textContent = 'breaking';
-      sevTd.appendChild(breakingBadge);
-    }
-    tr.appendChild(sevTd);
+      const versionTd = document.createElement('td');
+      versionTd.textContent = `${row.current_version || '?'} → ${row.target_version || '?'}`;
+      tr.appendChild(versionTd);
 
-    const confTd = document.createElement('td');
-    confTd.textContent = row.confidence ?? '';
-    tr.appendChild(confTd);
+      const typeTd = document.createElement('td');
+      typeTd.textContent = row.update_type || '';
+      tr.appendChild(typeTd);
 
-    const summaryTd = document.createElement('td');
-    summaryTd.textContent = row.summary || '';
-    if (row.reasoning) {
-      const details = document.createElement('details');
-      const summaryEl = document.createElement('summary');
-      summaryEl.textContent = 'reasoning';
-      const p = document.createElement('p');
-      p.textContent = row.reasoning;
-      details.appendChild(summaryEl);
-      details.appendChild(p);
-      summaryTd.appendChild(details);
-    }
-    tr.appendChild(summaryTd);
+      const sevTd = document.createElement('td');
+      const sevBadge = document.createElement('span');
+      sevBadge.className = `badge sev-${row.severity || 'none'}`;
+      sevBadge.textContent = row.severity || 'none';
+      sevTd.appendChild(sevBadge);
+      if (row.breaking === true || row.breaking === 'true') {
+        const breakingBadge = document.createElement('span');
+        breakingBadge.className = 'badge badge-breaking';
+        breakingBadge.textContent = 'breaking';
+        sevTd.appendChild(breakingBadge);
+      }
+      tr.appendChild(sevTd);
 
-    const actionsTd = document.createElement('td');
-    const actionsDiv = document.createElement('div');
-    actionsDiv.className = 'actions';
-    const approveBtn = document.createElement('button');
-    approveBtn.className = 'btn-approve';
-    approveBtn.textContent = 'Approve';
-    approveBtn.onclick = () => decide(row.id, 'approved');
-    const dismissBtn = document.createElement('button');
-    dismissBtn.className = 'btn-dismiss';
-    dismissBtn.textContent = 'Dismiss';
-    dismissBtn.onclick = () => decide(row.id, 'dismissed');
-    actionsDiv.appendChild(approveBtn);
-    actionsDiv.appendChild(dismissBtn);
-    actionsTd.appendChild(actionsDiv);
-    tr.appendChild(actionsTd);
+      const confTd = document.createElement('td');
+      confTd.textContent = row.confidence ?? '';
+      tr.appendChild(confTd);
 
-    bodyEl.appendChild(tr);
+      const summaryTd = document.createElement('td');
+      summaryTd.textContent = row.summary || '';
+      if (row.reasoning) {
+        const details = document.createElement('details');
+        const summaryEl = document.createElement('summary');
+        summaryEl.textContent = 'reasoning';
+        const p = document.createElement('p');
+        p.textContent = row.reasoning;
+        details.appendChild(summaryEl);
+        details.appendChild(p);
+        summaryTd.appendChild(details);
+      }
+      tr.appendChild(summaryTd);
+
+      // One shared actions cell per group, spanning all its rows via rowspan.
+      if (i === 0) {
+        const actionsTd = document.createElement('td');
+        actionsTd.className = 'actions-cell';
+        actionsTd.rowSpan = groupRows.length;
+        const actionsDiv = document.createElement('div');
+        actionsDiv.className = 'actions';
+        const approveBtn = document.createElement('button');
+        approveBtn.className = 'btn-approve';
+        approveBtn.textContent = 'Approve';
+        approveBtn.onclick = () => decideGroup(appName, ids, 'approved');
+        const dismissBtn = document.createElement('button');
+        dismissBtn.className = 'btn-dismiss';
+        dismissBtn.textContent = 'Dismiss';
+        dismissBtn.onclick = () => decideGroup(appName, ids, 'dismissed');
+        actionsDiv.appendChild(approveBtn);
+        actionsDiv.appendChild(dismissBtn);
+        actionsTd.appendChild(actionsDiv);
+        tr.appendChild(actionsTd);
+      }
+
+      bodyEl.appendChild(tr);
+    });
   }
 
   tableEl.hidden = false;
 }
 
-async function decide(id, decision) {
+async function decideGroup(appName, ids, decision) {
   try {
-    const resp = await fetch(`/api/updates/${id}/decide`, {
+    const resp = await fetch('/api/updates/decide-group', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ decision }),
+      body: JSON.stringify({ app_name: appName, ids, decision }),
     });
     if (!resp.ok) throw new Error(`Request failed: ${resp.status}`);
+    const result = await resp.json();
+    if (result.failed && result.failed.length) {
+      alert(`Some rows failed to record (ids: ${result.failed.join(', ')}). They will still appear below.`);
+    }
   } catch (err) {
     alert(`Failed to record decision: ${err}`);
   }

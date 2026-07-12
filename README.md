@@ -11,8 +11,14 @@ page only records the decision.
 - `GET /` serves a single static HTML page (`app/static/index.html`, plain
   JS `fetch()`, no framework/build step).
 - `GET /api/updates` proxies to the n8n webhook `GET /webhook/pending-updates`.
-- `POST /api/updates/{id}/decide` proxies to `POST /webhook/decide-update`
-  with `{"id": <id>, "decision": "approved" | "dismissed"}`.
+- `POST /api/updates/decide-group` — body
+  `{"app_name": <str>, "ids": [<id>, ...], "decision": "approved" | "dismissed"}`.
+  n8n decides one row per POST (fixed contract), so this endpoint fans out
+  sequential `POST /webhook/decide-update` calls in Python and returns
+  `{"succeeded": [...], "failed": [...]}` so partial failures are visible.
+  The page groups pending rows by `app_name` (stack) and calls this once per
+  group; a single-container app is just a one-element `ids` list. Failed rows
+  reappear on the next fetch (the page re-fetches after every action).
 - The n8n webhooks require a shared-secret `X-Api-Key` header. This backend
   holds that secret server-side (env var) so the browser never sees it and
   CORS never comes up.

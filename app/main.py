@@ -47,17 +47,45 @@ async def get_updates() -> Response:
     return JSONResponse(content=resp.json(), status_code=resp.status_code)
 
 
-@app.post("/api/updates/{row_id}/decide")
-async def decide_update(row_id: int, payload: dict) -> Response:
-    _require_config()
-    decision = payload.get("decision")
-    if decision not in ("approved", "dismissed"):
-        raise HTTPException(status_code=400, detail="decision must be 'approved' or 'dismissed'")
-    async with httpx.AsyncClient() as client:
+async def _decide_one(client: httpx.AsyncClient, row_id: int, decision: str) -> bool:
+    """POST a single decision to n8n. Returns True on success (2xx), else False."""
+    try:
         resp = await client.post(
             f"{N8N_BASE_URL}/webhook/decide-update",
             headers={"X-Api-Key": N8N_API_KEY},
             json={"id": row_id, "decision": decision},
             timeout=15,
         )
-    return JSONResponse(content=resp.json(), status_code=resp.status_code)
+        return resp.is_success
+    except httpx.HTTPError:
+        return False
+
+
+@app.post("/api/updates/decide-group")
+async def decide_group(payload: dict) -> Response:
+    """Apply one decision to every row in a stack group.
+
+    Body: {"app_name": <str>, "ids": [<int>, ...], "decision": "approved"|"dismissed"}.
+    n8n decides one row per POST (fixed contract), so we fan out sequential POSTs
+    here in Python and report which ids failed. A single-container group is just a
+    one-element `ids` list. The page re-fetches after any action, so any rows whose
+    decision failed simply reappear.
+    """
+    _require_config()
+    decision = payload.get("decision")
+    if decision not in ("approved", "dismissed"):
+        raise HTTPException(status_code=400, detail="decision must be 'approved' or 'dismissed'")
+    ids = payload.get("ids")
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(status_code=400, detail="ids must be a non-empty list")
+
+    succeeded: list[int] = []
+    failed: list[int] = []
+    async with httpx.AsyncClient() as client:
+        for row_id in ids:
+            if await _decide_one(client, row_id, decision):
+                succeeded.append(row_id)
+            else:
+                failed.append(row_id)
+
+    return JSONResponse(content={"succeeded": succeeded, "failed": failed})
