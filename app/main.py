@@ -51,15 +51,21 @@ async def get_updates() -> Response:
 async def decide_group(payload: dict) -> Response:
     """Apply one decision to every row in a stack group, in a single call.
 
-    Body: {"app_name": <str>, "ids": [<int>, ...], "decision": "approved"|"dismissed"}.
+    Body: {"app_name": <str>, "host": <str>, "ids": [<int>, ...], "decision": "approved"|"dismissed"}.
+    app_name alone doesn't uniquely identify a stack (the same stack name can
+    exist on two different hosts), so host travels alongside it end to end.
     A Portainer stack / TrueNAS app is updated as a whole, so its rows share one
     decision and — critically — one apply. We forward the whole group to n8n's
-    `POST /webhook/decide-group`, which marks every id and dispatches at most ONE
-    Apply Entry execution per stack (no per-row fan-out, so one approval click can
-    never spawn N concurrent stack applies). The grouped call is atomic from the
-    page's view: 2xx ⇒ all ids recorded, otherwise none. Failed rows reappear on
-    the next fetch (the page re-fetches after every action). `{succeeded, failed}`
-    response shape is kept for the frontend.
+    `POST /webhook/decide-group`, which validates the group server-side (every
+    id exists for that app_name+host, is still `status=pending`, and shares one
+    workflow_id) before mutating anything, then marks every id and dispatches at
+    most ONE Apply Entry execution per stack (no per-row fan-out, so one approval
+    click can never spawn N concurrent stack applies). The grouped call is atomic
+    from the page's view: 2xx ⇒ all ids recorded, otherwise none. On a 400
+    (validation rejected — e.g. a stale tab re-submitting an already-decided
+    group) n8n's reason is surfaced as the failure detail instead of a generic
+    message. Failed rows reappear on the next fetch (the page re-fetches after
+    every action). `{succeeded, failed}` response shape is kept for the frontend.
     """
     _require_config()
     decision = payload.get("decision")
@@ -69,19 +75,27 @@ async def decide_group(payload: dict) -> Response:
     if not isinstance(ids, list) or not ids:
         raise HTTPException(status_code=400, detail="ids must be a non-empty list")
     app_name = payload.get("app_name")
+    host = payload.get("host")
 
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f"{N8N_BASE_URL}/webhook/decide-group",
                 headers={"X-Api-Key": N8N_API_KEY},
-                json={"app_name": app_name, "ids": ids, "decision": decision},
+                json={"app_name": app_name, "host": host, "ids": ids, "decision": decision},
                 timeout=30,
             )
         ok = resp.is_success
+        reason = None
+        if not ok and resp.status_code == 400:
+            try:
+                reason = resp.json().get("error")
+            except ValueError:
+                reason = None
     except httpx.HTTPError:
         ok = False
+        reason = None
 
     if ok:
         return JSONResponse(content={"succeeded": ids, "failed": []})
-    return JSONResponse(content={"succeeded": [], "failed": ids})
+    return JSONResponse(content={"succeeded": [], "failed": ids, "reason": reason})

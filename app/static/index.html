@@ -75,17 +75,22 @@ async function loadUpdates() {
     return;
   }
 
-  // Group rows by app_name (stack), preserving first-seen order. Portainer
+  // Group rows by app_name + host, preserving first-seen order. Portainer
   // stacks / TrueNAS apps are updated as a whole, so all containers of one
-  // stack share a single Approve/Dismiss decision.
+  // stack share a single Approve/Dismiss decision. app_name alone is not a
+  // unique key: the same stack name can exist on two different hosts (e.g.
+  // a test stack deployed to both nas and piguard), so host is part of the
+  // group key to keep those apart.
   const groups = new Map();
   for (const row of rows) {
-    const key = row.app_name || '';
+    const key = `${row.app_name || ''}::${row.host || ''}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(row);
   }
 
-  for (const [appName, groupRows] of groups) {
+  for (const [, groupRows] of groups) {
+    const appName = groupRows[0].app_name || '';
+    const host = groupRows[0].host || '';
     const ids = groupRows.map(r => r.id);
     groupRows.forEach((row, i) => {
       const tr = document.createElement('tr');
@@ -93,6 +98,13 @@ async function loadUpdates() {
 
       const appTd = document.createElement('td');
       appTd.textContent = row.app_name || '';
+      if (i === 0 && host) {
+        const hostSpan = document.createElement('span');
+        hostSpan.style.opacity = '0.6';
+        hostSpan.style.marginLeft = '0.4rem';
+        hostSpan.textContent = `(${host})`;
+        appTd.appendChild(hostSpan);
+      }
       tr.appendChild(appTd);
 
       const containerTd = document.createElement('td');
@@ -148,11 +160,11 @@ async function loadUpdates() {
         const approveBtn = document.createElement('button');
         approveBtn.className = 'btn-approve';
         approveBtn.textContent = 'Approve';
-        approveBtn.onclick = () => decideGroup(appName, ids, 'approved');
+        approveBtn.onclick = () => decideGroup(appName, host, ids, 'approved');
         const dismissBtn = document.createElement('button');
         dismissBtn.className = 'btn-dismiss';
         dismissBtn.textContent = 'Dismiss';
-        dismissBtn.onclick = () => decideGroup(appName, ids, 'dismissed');
+        dismissBtn.onclick = () => decideGroup(appName, host, ids, 'dismissed');
         actionsDiv.appendChild(approveBtn);
         actionsDiv.appendChild(dismissBtn);
         actionsTd.appendChild(actionsDiv);
@@ -166,7 +178,7 @@ async function loadUpdates() {
   tableEl.hidden = false;
 }
 
-async function decideGroup(appName, ids, decision) {
+async function decideGroup(appName, host, ids, decision) {
   // Disable every action button while the request is in flight so a double-click
   // (or approving a second stack mid-request) can't spawn duplicate decisions.
   // loadUpdates() re-renders fresh buttons at the end, so no manual re-enable.
@@ -176,12 +188,13 @@ async function decideGroup(appName, ids, decision) {
     const resp = await fetch('/api/updates/decide-group', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ app_name: appName, ids, decision }),
+      body: JSON.stringify({ app_name: appName, host, ids, decision }),
     });
     if (!resp.ok) throw new Error(`Request failed: ${resp.status}`);
     const result = await resp.json();
     if (result.failed && result.failed.length) {
-      alert(`Some rows failed to record (ids: ${result.failed.join(', ')}). They will still appear below.`);
+      const reasonSuffix = result.reason ? `\nReason: ${result.reason}` : '';
+      alert(`Some rows failed to record (ids: ${result.failed.join(', ')}). They will still appear below.${reasonSuffix}`);
     }
   } catch (err) {
     alert(`Failed to record decision: ${err}`);

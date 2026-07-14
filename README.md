@@ -12,16 +12,23 @@ page only records the decision.
   JS `fetch()`, no framework/build step).
 - `GET /api/updates` proxies to the n8n webhook `GET /webhook/pending-updates`.
 - `POST /api/updates/decide-group` — body
-  `{"app_name": <str>, "ids": [<id>, ...], "decision": "approved" | "dismissed"}`.
-  Forwards the whole group as a single `POST /webhook/decide-group` to n8n, which
-  marks every id and dispatches **at most one Apply Entry execution per stack** —
-  so one approval click never fans out into N concurrent stack applies (the
-  applier re-reads and bundles all approved rows for the stack itself). Returns
-  `{"succeeded": [...], "failed": [...]}` for the frontend; the grouped call is
-  atomic from the page's view (2xx ⇒ all ids recorded, else none). The page
-  groups pending rows by `app_name` (stack) and calls this once per group; a
-  single-container app is just a one-element `ids` list. Failed rows reappear on
-  the next fetch (the page re-fetches after every action).
+  `{"app_name": <str>, "host": <str>, "ids": [<id>, ...], "decision": "approved" | "dismissed"}`.
+  `app_name` alone doesn't uniquely identify a stack — the same stack name can
+  exist on two different hosts (e.g. a test stack deployed to both `nas` and
+  `piguard`) — so the page groups pending rows by `app_name` + `host` and
+  sends both. Forwards the whole group as a single `POST /webhook/decide-group`
+  to n8n, which validates server-side before mutating anything (every id must
+  exist for that app_name+host, be `status=pending`, and share one
+  `workflow_id`; a stale browser tab re-submitting an already-decided group
+  gets rejected here) then marks every id and dispatches **at most one Apply
+  Entry execution per stack**, using the validated `workflow_id` — so one
+  approval click never fans out into N concurrent stack applies, and a
+  rejected group never partially dispatches. Returns
+  `{"succeeded": [...], "failed": [...], "reason": <str | null>}` for the
+  frontend (`reason` set when n8n's validation rejected the group); the
+  grouped call is atomic from the page's view (2xx ⇒ all ids recorded, else
+  none). A single-container app is just a one-element `ids` list. Failed rows
+  reappear on the next fetch (the page re-fetches after every action).
 - The n8n webhooks require a shared-secret `X-Api-Key` header. This backend
   holds that secret server-side (env var) so the browser never sees it and
   CORS never comes up.
@@ -52,14 +59,22 @@ The n8n workflow **`Update Approval API`** exposes three webhooks:
 - `GET /webhook/pending-updates` — returns pending rows from the
   `pending_updates` Data Table.
 - `POST /webhook/decide-group` — body
-  `{"app_name": <str>, "ids": [<id>, ...], "decision": "approved" | "dismissed"}`.
-  Marks every id's `status`/`decided_at`/`decided_by`, then (on approval)
-  dispatches one Apply Entry execution per distinct `workflow_id` in the group
-  (normally one, since a group is one stack). This is the path the page uses.
+  `{"app_name": <str>, "host": <str>, "ids": [<id>, ...], "decision": "approved" | "dismissed"}`.
+  Fetches the candidate rows for that `app_name`+`host`, then rejects with 400
+  (`{"error": <reason>}`, nothing mutated) unless every supplied id exists in
+  that set, is `status=pending`, and all share one `workflow_id`. On success,
+  marks every id's `status`/`decided_at`/`decided_by` (the update itself is
+  additionally filtered on `status=pending`, closing the race window between
+  the validation read and the write), then on approval dispatches once using
+  the validated `workflow_id`. If that dispatch throws (e.g. stale/unpublished
+  `workflow_id`), the rows stay approved (the webhook has already responded)
+  and a Discord alert fires so the stuck rows don't go unnoticed. This is the
+  path the page uses.
 - `POST /webhook/decide-update` — legacy single-row path, body
   `{"id": <row id>, "decision": "approved" | "dismissed"}`, updates that row's
   `status` and `decided_at`. Retained for compatibility; the page no longer
-  calls it.
+  calls it. Its apply dispatch gets the same Discord alert-on-failure as
+  `decide-group`.
 
 All endpoints check the same shared-secret `X-Api-Key` header (webhook
 header-auth credential). Set the real secret in two places:
