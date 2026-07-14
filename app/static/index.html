@@ -167,6 +167,11 @@ async function loadUpdates() {
 }
 
 async function decideGroup(appName, ids, decision) {
+  // Disable every action button while the request is in flight so a double-click
+  // (or approving a second stack mid-request) can't spawn duplicate decisions.
+  // loadUpdates() re-renders fresh buttons at the end, so no manual re-enable.
+  const buttons = document.querySelectorAll('#updates-body button');
+  buttons.forEach(b => { b.disabled = true; });
   try {
     const resp = await fetch('/api/updates/decide-group', {
       method: 'POST',

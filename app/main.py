@@ -47,29 +47,19 @@ async def get_updates() -> Response:
     return JSONResponse(content=resp.json(), status_code=resp.status_code)
 
 
-async def _decide_one(client: httpx.AsyncClient, row_id: int, decision: str) -> bool:
-    """POST a single decision to n8n. Returns True on success (2xx), else False."""
-    try:
-        resp = await client.post(
-            f"{N8N_BASE_URL}/webhook/decide-update",
-            headers={"X-Api-Key": N8N_API_KEY},
-            json={"id": row_id, "decision": decision},
-            timeout=15,
-        )
-        return resp.is_success
-    except httpx.HTTPError:
-        return False
-
-
 @app.post("/api/updates/decide-group")
 async def decide_group(payload: dict) -> Response:
-    """Apply one decision to every row in a stack group.
+    """Apply one decision to every row in a stack group, in a single call.
 
     Body: {"app_name": <str>, "ids": [<int>, ...], "decision": "approved"|"dismissed"}.
-    n8n decides one row per POST (fixed contract), so we fan out sequential POSTs
-    here in Python and report which ids failed. A single-container group is just a
-    one-element `ids` list. The page re-fetches after any action, so any rows whose
-    decision failed simply reappear.
+    A Portainer stack / TrueNAS app is updated as a whole, so its rows share one
+    decision and — critically — one apply. We forward the whole group to n8n's
+    `POST /webhook/decide-group`, which marks every id and dispatches at most ONE
+    Apply Entry execution per stack (no per-row fan-out, so one approval click can
+    never spawn N concurrent stack applies). The grouped call is atomic from the
+    page's view: 2xx ⇒ all ids recorded, otherwise none. Failed rows reappear on
+    the next fetch (the page re-fetches after every action). `{succeeded, failed}`
+    response shape is kept for the frontend.
     """
     _require_config()
     decision = payload.get("decision")
@@ -78,14 +68,20 @@ async def decide_group(payload: dict) -> Response:
     ids = payload.get("ids")
     if not isinstance(ids, list) or not ids:
         raise HTTPException(status_code=400, detail="ids must be a non-empty list")
+    app_name = payload.get("app_name")
 
-    succeeded: list[int] = []
-    failed: list[int] = []
-    async with httpx.AsyncClient() as client:
-        for row_id in ids:
-            if await _decide_one(client, row_id, decision):
-                succeeded.append(row_id)
-            else:
-                failed.append(row_id)
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{N8N_BASE_URL}/webhook/decide-group",
+                headers={"X-Api-Key": N8N_API_KEY},
+                json={"app_name": app_name, "ids": ids, "decision": decision},
+                timeout=30,
+            )
+        ok = resp.is_success
+    except httpx.HTTPError:
+        ok = False
 
-    return JSONResponse(content={"succeeded": succeeded, "failed": failed})
+    if ok:
+        return JSONResponse(content={"succeeded": ids, "failed": []})
+    return JSONResponse(content={"succeeded": [], "failed": ids})

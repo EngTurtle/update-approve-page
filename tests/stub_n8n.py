@@ -3,9 +3,11 @@
 Run: uv run --with fastapi --with uvicorn uvicorn tests.stub_n8n:app --port 8099
 Then point the real app at it: N8N_BASE_URL=http://127.0.0.1:8099 N8N_API_KEY=dev ...
 
-Implements GET /webhook/pending-updates and POST /webhook/decide-update over
-in-memory fixtures, including a multi-container group (beszel) and a single-row
-app (gotify). Set fail id 3 to exercise the partial-failure path.
+Implements GET /webhook/pending-updates, POST /webhook/decide-group (the grouped
+per-stack path the page uses), and the legacy POST /webhook/decide-update, over
+in-memory fixtures with a multi-container group (beszel) and a single-row app
+(gotify). id 3 is in FAIL_IDS: a group containing it fails atomically (whole
+group 500s and reappears), exercising the group-failure path.
 """
 
 from fastapi import FastAPI, Request, Response
@@ -38,6 +40,22 @@ ROWS = [
 @app.get("/webhook/pending-updates")
 def pending():
     return [r for r in ROWS if r["status"] == "pending"]
+
+
+@app.post("/webhook/decide-group")
+async def decide_group(request: Request):
+    """Mark every id in the group atomically. If any id is in FAIL_IDS, the whole
+    group 500s and nothing is marked (mirrors the real grouped webhook: one call,
+    one decision, at most one apply dispatch per stack)."""
+    body = await request.json()
+    ids = body.get("ids") or []
+    if any(i in FAIL_IDS for i in ids):
+        return Response(status_code=500)
+    decision = body.get("decision")
+    for r in ROWS:
+        if r["id"] in ids:
+            r["status"] = decision
+    return {"ok": True, "ids": ids, "decision": decision}
 
 
 @app.post("/webhook/decide-update")
