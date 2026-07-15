@@ -10,17 +10,20 @@ in-memory fixtures with a multi-container group (beszel) and a single-row app
 group 500s and reappears), exercising the group-failure path.
 
 decide-group mirrors the real n8n workflow's server-side validation: every
-supplied id must exist for the given app_name+host, be status=pending, and
-share one workflow_id, or the call 400s with a reason and mutates nothing
-(also covers the "two stacks with the same app_name, different host" case and
-the "stale tab re-submits an already-decided group" case).
+supplied id must exist for the given app_name+host, be status=pending, share
+one workflow_id, and — for an approve — have a resolved digest and a
+non-empty target_version (dismiss is unconstrained), or the call 400s with a
+reason and mutates nothing (also covers the "two stacks with the same
+app_name, different host" case and the "stale tab re-submits an
+already-decided group" case). On success the response is the real contract:
+`{"updated_ids": [...], "decision": ...}` — the exact ids actually updated.
 """
 
 from fastapi import FastAPI, Request, Response
 
 app = FastAPI()
 
-# id 3 (beszel-agent) always fails, to exercise decide-group partial failure.
+# id 3 (beszel-agent) always fails dispatch, to exercise decide-group partial failure.
 FAIL_IDS = {3}
 
 ROWS = [
@@ -28,30 +31,37 @@ ROWS = [
      "host": "piguard", "update_type": "digest_drift", "current_version": "1.0", "target_version": "1.1",
      "release_notes_source": "", "breaking": False, "severity": "minor", "confidence": 0.9,
      "summary": "socket-proxy digest drift", "reasoning": "new digest", "status": "pending",
-     "workflow_id": "wf-beszel"},
+     "workflow_id": "wf-beszel", "digest_unknown": False, "evidence_quality": "complete",
+     "approval_disposition": "manual"},
     {"id": 2, "app_name": "beszel", "service_name": "beszel", "install_type": "portainer",
      "host": "piguard", "update_type": "tag_bump", "current_version": "0.9", "target_version": "0.10",
      "release_notes_source": "", "breaking": True, "severity": "major", "confidence": 0.8,
      "summary": "beszel core tag bump", "reasoning": "minor release", "status": "pending",
-     "workflow_id": "wf-beszel"},
+     "workflow_id": "wf-beszel", "digest_unknown": False, "evidence_quality": "partial",
+     "approval_disposition": "manual"},
     {"id": 3, "app_name": "beszel", "service_name": "beszel-agent", "install_type": "portainer",
      "host": "piguard", "update_type": "tag_bump", "current_version": "0.9", "target_version": "0.10",
      "release_notes_source": "", "breaking": False, "severity": "none", "confidence": 0.8,
      "summary": "beszel-agent tag bump", "reasoning": "", "status": "pending",
-     "workflow_id": "wf-beszel"},
+     "workflow_id": "wf-beszel", "digest_unknown": False, "evidence_quality": "tags_only",
+     "approval_disposition": "manual"},
     {"id": 4, "app_name": "gotify", "service_name": "gotify", "install_type": "truenas",
      "host": "nas", "update_type": "catalog", "current_version": "2.5", "target_version": "2.6",
      "release_notes_source": "github", "breaking": False, "severity": "minor", "confidence": 0.95,
      "summary": "gotify catalog update", "reasoning": "routine", "status": "pending",
-     "workflow_id": "wf-gotify"},
+     "workflow_id": "wf-gotify", "digest_unknown": False, "evidence_quality": "complete",
+     "approval_disposition": "auto"},
     # Same app_name as row 4 (gotify) but a different host and workflow_id, to
     # exercise the app_name+host grouping fix (F3a/F3b) — these must never be
-    # merged into row 4's group.
+    # merged into row 4's group. Also the digest_unknown fixture: this row's
+    # digest hasn't resolved, so its (single-row) group's Approve is blocked
+    # both client-side and server-side.
     {"id": 5, "app_name": "gotify", "service_name": "gotify", "install_type": "portainer",
      "host": "piguard", "update_type": "digest_drift", "current_version": "2.5", "target_version": "2.6",
      "release_notes_source": "", "breaking": False, "severity": "minor", "confidence": 0.9,
      "summary": "gotify digest drift on piguard", "reasoning": "", "status": "pending",
-     "workflow_id": "wf-gotify-piguard"},
+     "workflow_id": "wf-gotify-piguard", "digest_unknown": True, "evidence_quality": "missing",
+     "approval_disposition": ""},
 ]
 
 
@@ -99,13 +109,25 @@ async def decide_group(request: Request):
             media_type="application/json",
         )
 
+    if decision == "approved":
+        unresolved = [
+            i for i in ids
+            if candidates[i]["digest_unknown"] in (True, "true") or not candidates[i]["target_version"]
+        ]
+        if unresolved:
+            return Response(
+                status_code=400,
+                content=f'{{"error": "row(s) have unresolved digest or missing target_version: {unresolved}"}}',
+                media_type="application/json",
+            )
+
     if any(i in FAIL_IDS for i in ids):
         return Response(status_code=500)
 
     for r in ROWS:
         if r["id"] in ids:
             r["status"] = decision
-    return {"ok": True, "ids": ids, "decision": decision}
+    return {"updated_ids": ids, "decision": decision}
 
 
 @app.post("/webhook/decide-update")

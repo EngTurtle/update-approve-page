@@ -16,6 +16,11 @@
   .sev-major { background: #e6820020; color: #e68200; }
   .sev-breaking { background: #c6282820; color: #c62828; }
   .badge-breaking { background: #c6282820; color: #c62828; margin-left: 0.3rem; }
+  .evi-complete { background: #2e7d3220; color: #2e7d32; }
+  .evi-partial, .evi-tags_only { background: #e6820020; color: #e68200; }
+  .evi-missing, .evi-unknown { background: #c6282820; color: #c62828; }
+  .badge-digest { background: #c6282820; color: #c62828; margin-left: 0.3rem; }
+  button:disabled { cursor: not-allowed; opacity: 0.45; }
   button { cursor: pointer; padding: 0.35rem 0.8rem; border-radius: 6px; border: 1px solid #8886; font-size: 0.85rem; }
   .btn-approve { background: #2e7d3220; }
   .btn-dismiss { background: #c6282820; }
@@ -41,6 +46,7 @@
       <th>Type</th>
       <th>Severity</th>
       <th>Confidence</th>
+      <th>Evidence</th>
       <th>Summary</th>
       <th>Actions</th>
     </tr>
@@ -92,6 +98,14 @@ async function loadUpdates() {
     const appName = groupRows[0].app_name || '';
     const host = groupRows[0].host || '';
     const ids = groupRows.map(r => r.id);
+    // Client-side UX gate only — the backend/n8n enforce this for real. Block
+    // Approve if any row's digest is unresolved or its target_version is
+    // missing; n8n's decide-group would 400 the whole group anyway. Dismiss
+    // is never blocked.
+    const groupBlocked = groupRows.some(r => {
+      const digestUnknown = r.digest_unknown === true || r.digest_unknown === 'true';
+      return digestUnknown || !r.target_version;
+    });
     groupRows.forEach((row, i) => {
       const tr = document.createElement('tr');
       if (i === 0) tr.className = 'group-start';
@@ -136,6 +150,20 @@ async function loadUpdates() {
       confTd.textContent = row.confidence ?? '';
       tr.appendChild(confTd);
 
+      const eviTd = document.createElement('td');
+      const eviQuality = row.evidence_quality || 'missing';
+      const eviBadge = document.createElement('span');
+      eviBadge.className = `badge evi-${eviQuality}`;
+      eviBadge.textContent = row.evidence_quality || 'missing';
+      eviTd.appendChild(eviBadge);
+      if (row.digest_unknown === true || row.digest_unknown === 'true') {
+        const digestBadge = document.createElement('span');
+        digestBadge.className = 'badge badge-digest';
+        digestBadge.textContent = 'digest?';
+        eviTd.appendChild(digestBadge);
+      }
+      tr.appendChild(eviTd);
+
       const summaryTd = document.createElement('td');
       summaryTd.textContent = row.summary || '';
       if (row.reasoning) {
@@ -160,6 +188,10 @@ async function loadUpdates() {
         const approveBtn = document.createElement('button');
         approveBtn.className = 'btn-approve';
         approveBtn.textContent = 'Approve';
+        if (groupBlocked) {
+          approveBtn.disabled = true;
+          approveBtn.title = 'group contains unresolved rows — dismiss or wait for re-scan';
+        }
         approveBtn.onclick = () => decideGroup(appName, host, ids, 'approved');
         const dismissBtn = document.createElement('button');
         dismissBtn.className = 'btn-dismiss';
@@ -190,11 +222,14 @@ async function decideGroup(appName, host, ids, decision) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ app_name: appName, host, ids, decision }),
     });
-    if (!resp.ok) throw new Error(`Request failed: ${resp.status}`);
-    const result = await resp.json();
-    if (result.failed && result.failed.length) {
-      const reasonSuffix = result.reason ? `\nReason: ${result.reason}` : '';
-      alert(`Some rows failed to record (ids: ${result.failed.join(', ')}). They will still appear below.${reasonSuffix}`);
+    const result = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      // Upstream (n8n) rejected the whole group, or our own validation 422'd —
+      // show the actual reason instead of a generic status-code message.
+      const reason = result.error || (typeof result.detail === 'string' ? result.detail : null);
+      alert(`Decision rejected: ${reason || `request failed (${resp.status})`}`);
+    } else if (result.failed && result.failed.length) {
+      alert(`Some rows failed to record (ids: ${result.failed.join(', ')}). They will still appear below.`);
     }
   } catch (err) {
     alert(`Failed to record decision: ${err}`);

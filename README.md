@@ -12,23 +12,31 @@ page only records the decision.
   JS `fetch()`, no framework/build step).
 - `GET /api/updates` proxies to the n8n webhook `GET /webhook/pending-updates`.
 - `POST /api/updates/decide-group` — body
-  `{"app_name": <str>, "host": <str>, "ids": [<id>, ...], "decision": "approved" | "dismissed"}`.
-  `app_name` alone doesn't uniquely identify a stack — the same stack name can
-  exist on two different hosts (e.g. a test stack deployed to both `nas` and
-  `piguard`) — so the page groups pending rows by `app_name` + `host` and
-  sends both. Forwards the whole group as a single `POST /webhook/decide-group`
-  to n8n, which validates server-side before mutating anything (every id must
-  exist for that app_name+host, be `status=pending`, and share one
-  `workflow_id`; a stale browser tab re-submitting an already-decided group
-  gets rejected here) then marks every id and dispatches **at most one Apply
-  Entry execution per stack**, using the validated `workflow_id` — so one
-  approval click never fans out into N concurrent stack applies, and a
-  rejected group never partially dispatches. Returns
-  `{"succeeded": [...], "failed": [...], "reason": <str | null>}` for the
-  frontend (`reason` set when n8n's validation rejected the group); the
-  grouped call is atomic from the page's view (2xx ⇒ all ids recorded, else
-  none). A single-container app is just a one-element `ids` list. Failed rows
-  reappear on the next fetch (the page re-fetches after every action).
+  `{"app_name": <str>, "host": <str>, "ids": [<id>, ...], "decision": "approved" | "dismissed"}`,
+  validated server-side (non-empty `app_name`/`host`, non-empty deduplicated
+  `ids`, `decision` in `{approved, dismissed}`, no extra fields — a violation
+  422s). `app_name` alone doesn't uniquely identify a stack — the same stack
+  name can exist on two different hosts (e.g. a test stack deployed to both
+  `nas` and `piguard`) — so the page groups pending rows by `app_name` + `host`
+  and sends both. Forwards the whole group as a single
+  `POST /webhook/decide-group` to n8n, which validates server-side before
+  mutating anything (every id must exist for that app_name+host, be
+  `status=pending`, share one `workflow_id`, and — for an approve — have a
+  resolved digest and non-empty `target_version`; dismiss is unconstrained)
+  then marks every id and dispatches **at most one Apply Entry execution per
+  stack**, using the validated `workflow_id` — so one approval click never
+  fans out into N concurrent stack applies, and a rejected group never
+  partially dispatches. n8n's 2xx response is the exact ids it updated
+  (`{"updated_ids": [...], "decision": ...}`), which this page reports back as
+  `{"succeeded": [...], "failed": [...]}` (any requested id absent from
+  `updated_ids` counts as failed). If a 2xx response has no `updated_ids`
+  field at all (old n8n workflow, pre-contract-change), every requested id is
+  treated as succeeded — so this page and the n8n workflow can be redeployed
+  in either order. On a 4xx, nothing is recorded and n8n's reason is passed
+  through as `{"error": <reason>}` with the same status code (other error
+  statuses are normalized to 502) so the page can show it directly. A
+  single-container app is just a one-element `ids` list. Failed rows reappear
+  on the next fetch (the page re-fetches after every action).
 - The n8n webhooks require a shared-secret `X-Api-Key` header. This backend
   holds that secret server-side (env var) so the browser never sees it and
   CORS never comes up.
